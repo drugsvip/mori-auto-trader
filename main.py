@@ -1,29 +1,25 @@
-import time
-import requests
+import os
+from solana.rpc.api import Client
+from solders.keypair import Keypair
+from solders.pubkey import Pubkey
 
-TOKEN = "CrTNwtygzRQkpHAQbEsNAyNdiMUAsSWRcMakP81jpump"
-WALLET = "4Qvt9SabWos2JDx9PvjUywoyy9vXvSgBJ4KcRMcqzvm9"
-RPC = "https://api.mainnet-beta.solana.com"
+# Настройки
+TOKEN_MINT = os.getenv("TOKEN_MINT")
+MAIN_WALLET = os.getenv("MAIN_WALLET")
+PRIVATE_KEYS = [
+    os.getenv("PRIVATE_KEY_1"),
+    os.getenv("PRIVATE_KEY_2"),
+    os.getenv("PRIVATE_KEY_3"),
+]
 
-def buy_mori():
-    print("Buying MORI... (фейк-логика)")
-    # Тут вставляется реальный вызов торгового API, если будет
+client = Client("https://api.mainnet-beta.solana.com")
 
-def sell_mori():
-    print("Selling MORI... (фейк-логика)")
-    # Здесь реализация для продажи MORI
-
-def trade_loop():
-    print("Запуск MORI трейдера...")
-    while True:
-        try:
-            buy_mori()
-            time.sleep(10)  # Ждём
-            sell_mori()
-            time.sleep(20)
-        except Exception as e:
-            print(f"Ошибка: {e}")
-            time.sleep(30)
+def pump_logic():
+    print(f"Starting pump on token: {TOKEN_MINT}")
+    print(f"Main wallet: {MAIN_WALLET}")
+    for i, pk in enumerate(PRIVATE_KEYS, 1):
+        if pk:
+            print(f"Using wallet {i} to trade...")
 
 if __name__ == "__main__":
-    trade_loop()
+    pump_logic()
