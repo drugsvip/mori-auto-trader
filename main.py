@@ -2,44 +2,67 @@ import os
 import time
 import logging
 import requests
-import base64
+from dotenv import load_dotenv
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.transaction import Transaction
-from dotenv import load_dotenv
+from solders.system_program import transfer, TransferParams
+from solders.rpc.config import RpcSendTransactionConfig
 from solana.rpc.async_api import AsyncClient
-from solana.transaction import Transaction as SolanaTransaction
-from solana.system_program import TransferParams, transfer
+from solana.rpc.types import Lamports
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Настройка логирования с текущей датой
+current_time = time.strftime("%Y-%m-%d_%H-%M-%S", time.gmtime())
+log_file = f"bot_{current_time}.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(log_file)
+    ]
+)
 logger = logging.getLogger(__name__)
 
+# Загрузка переменных
 load_dotenv()
+TOKEN_MINT = os.getenv("TOKEN_MINT", "CrTNwtygzRQkpHAQbEsNAyNdiMUAsSWRcMakP81jpump")
+MAIN_WALLET = os.getenv("MAIN_WALLET", "4Qvt9SabWos2JDx9PvjUywoyy9vXvSgBJ4KcRMcqzvm9")
+PRIVATE_KEYS = [pk for pk in [os.getenv(f"PRIVATE_KEY_{i}") for i in range(1, 4)] if pk]
+RPC_ENDPOINT = os.getenv("RPC_ENDPOINT", "https://pit36.nodes.rpcpool.com")
+MIN_BALANCE_FOR_TX = Lamports(0.00015 * 1_000_000_000)
 
-TOKEN_MINT = os.getenv("TOKEN_MINT")
-MAIN_WALLET = os.getenv("MAIN_WALLET")
-PRIVATE_KEYS = [
-    os.getenv("PRIVATE_KEY_1"),
-    os.getenv("PRIVATE_KEY_2"),
-    os.getenv("PRIVATE_KEY_3")
-]
-
-if not all([TOKEN_MINT, MAIN_WALLET] + PRIVATE_KEYS):
-    logger.error("Одна или несколько переменных окружения не заданы")
+if not PRIVATE_KEYS:
+    logger.error("No private keys found. Exiting.")
     exit(1)
 
 main_wallet = Pubkey.from_string(MAIN_WALLET)
-keypairs = [Keypair.from_base58_string(pk) for pk in PRIVATE_KEYS if pk]
+keypairs = [Keypair.from_base58_string(pk) for pk in PRIVATE_KEYS]
+client = AsyncClient(RPC_ENDPOINT)
 
-DELAYS = [1, 3, 3, 7, 3, 2]
-AMOUNTS = [0.004, 0.003, 0.001, 0.002, 0.003, 0.002]
-LAMPORTS_PER_SOL = 1_000_000_000
-RPC_URL = "https://api.mainnet-beta.solana.com"
+DELAYS = [60, 180, 180, 420, 180, 120]
+AMOUNTS = [0.004, 0.003, 0.001, 0.002, 0.004, 0.003]
+SLIPPAGE_BPS = 100
+TIMEOUT = 15
 
-async def send_transaction(from_keypair: Keypair, to_pubkey: Pubkey, amount_sol: float, client):
+async def get_balance(pubkey: Pubkey) -> Lamports:
     try:
-        amount_lamports = int(amount_sol * LAMPORTS_PER_SOL)
-        txn = SolanaTransaction().add(
+        balance = await client.get_balance(pubkey)
+        return balance.value
+    except Exception as e:
+        logger.error(f"Balance error: {e}")
+        return Lamports(0)
+
+async def send_transaction(from_keypair: Keypair, to_pubkey: Pubkey, amount_sol: float) -> str | None:
+    try:
+        balance = await get_balance(from_keypair.pubkey())
+        amount_lamports = int(amount_sol * 1_000_000_000)
+        required_balance = amount_lamports + MIN_BALANCE_FOR_TX
+        if balance < required_balance:
+            logger.error(f"Not enough balance: {balance / 1_000_000_000:.6f} < {amount_sol + 0.00015:.6f} SOL")
+            return None
+
+        txn = Transaction().add(
             transfer(
                 TransferParams(
                     from_pubkey=from_keypair.pubkey(),
@@ -48,56 +71,76 @@ async def send_transaction(from_keypair: Keypair, to_pubkey: Pubkey, amount_sol:
                 )
             )
         )
-        response = await client.send_transaction(txn, from_keypair)
-        logger.info(f"TX отправлен: {response.value} | {from_keypair.pubkey()} → {to_pubkey} | {amount_sol} SOL")
-        return response.value
+        response = await client.send_transaction(
+            txn, from_keypair, config=RpcSendTransactionConfig(skip_preflight=False)
+        )
+        logger.info(f"Sent TX: {response.value} | {from_keypair.pubkey()} → {to_pubkey} ({amount_sol} SOL)")
+        return str(response.value)
     except Exception as e:
-        logger.error(f"TX ошибка: {e}")
+        logger.error(f"TX error: {e}")
         return None
 
-async def swap_on_dex(from_keypair: Keypair, amount_sol: float, token_mint: str, client):
+async def swap_on_jupiter(from_keypair: Keypair, amount_sol: float, token_mint: str) -> str | None:
     try:
-        pubkey_str = str(from_keypair.pubkey())
-        quote_url = "https://quote-api.jup.ag/v6/quote"
-        params = {
-            "inputMint": "So11111111111111111111111111111111111111112",
-            "outputMint": token_mint,
-            "amount": int(amount_sol * LAMPORTS_PER_SOL),
-            "slippageBps": 50
-        }
-        quote = requests.get(quote_url, params=params).json()
+        quote = requests.get(
+            "https://quote-api.jup.ag/v6/quote",
+            params={
+                "inputMint": "So11111111111111111111111111111111111111112",
+                "outputMint": token_mint,
+                "amount": int(amount_sol * 1_000_000_000),
+                "slippageBps": SLIPPAGE_BPS
+            },
+            timeout=TIMEOUT
+        ).json()
 
-        swap_url = "https://quote-api.jup.ag/v6/swap"
-        swap_data = {
-            "quoteResponse": quote,
-            "userPublicKey": pubkey_str,
-            "wrapAndUnwrapSol": True,
-            "swapMode": "ExactIn"
-        }
-        swap_response = requests.post(swap_url, json=swap_data).json()
-        swap_tx = swap_response["swapTransaction"]
+        if "error" in quote:
+            logger.error(f"Quote error: {quote['error']}")
+            return None
 
-        txn = Transaction.deserialize(base64.b64decode(swap_tx))
-        tx_result = await client.send_transaction(txn, from_keypair)
-        logger.info(f"Свап выполнен: {tx_result.value}")
-        return tx_result.value
+        response = requests.post(
+            "https://quote-api.jup.ag/v6/swap",
+            json={
+                "quoteResponse": quote,
+                "userPublicKey": str(from_keypair.pubkey()),
+                "wrapAndUnwrapSol": True
+            },
+            timeout=TIMEOUT
+        ).json()
+
+        if "error" in response:
+            logger.error(f"Swap error: {response['error']}")
+            return None
+
+        swap_tx = response["swapTransaction"]
+        txn = Transaction.deserialize(bytes.fromhex(swap_tx))
+        txid = await client.send_transaction(txn, from_keypair)
+        logger.info(f"Swap executed: {txid.value}")
+        return str(txid.value)
     except Exception as e:
-        logger.error(f"Ошибка свапа: {e}")
+        logger.error(f"Swap exception: {e}")
         return None
 
 async def main():
     import asyncio
     cycle = 0
-    client = AsyncClient(RPC_URL)
+    successful = 0
     while True:
-        for i, (delay, amount) in enumerate(zip(DELAYS, AMOUNTS)):
-            for keypair in keypairs:
-                logger.info(f"[Цикл {cycle+1}] Кошелёк: {keypair.pubkey()} | {amount} SOL")
-                await send_transaction(keypair, main_wallet, amount, client)
-                await swap_on_dex(keypair, amount, TOKEN_MINT, client)
-                logger.info(f"Ожидание {delay} минут")
-                await asyncio.sleep(delay * 60)
-        cycle += 1
+        try:
+            cycle += 1
+            logger.info(f"Cycle {cycle} started.")
+            for i, (delay, amount) in enumerate(zip(DELAYS, AMOUNTS)):
+                for kp in keypairs:
+                    logger.info(f"[{kp.pubkey()}] → {main_wallet} | {amount} SOL")
+                    txid = await send_transaction(kp, main_wallet, amount)
+                    if txid:
+                        swap_tx = await swap_on_jupiter(kp, amount, TOKEN_MINT)
+                        if swap_tx:
+                            successful += 1
+                    await asyncio.sleep(delay)
+            logger.info(f"Cycle {cycle} complete. Successful TXs: {successful}")
+        except Exception as e:
+            logger.error(f"Main loop error: {e}")
+            await asyncio.sleep(60)
 
 if __name__ == "__main__":
     import asyncio
